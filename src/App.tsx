@@ -2,7 +2,7 @@
 import {
   BadgeCheck,
   BookOpenCheck,
-  BrainCircuit,
+  BookMarked,
   CalendarDays,
   LogIn,
   LogOut,
@@ -26,6 +26,14 @@ type Checkin = {
 };
 
 type QuizMode = 'zh-to-en' | 'en-to-zh';
+
+type WrongAnswer = {
+  wordId: number;
+  mistakes: number;
+  lastWrongAt: string;
+  modes: string[];
+  lastSelected?: string;
+};
 
 type VocabularyWord = {
   id: number;
@@ -110,8 +118,11 @@ function buildQuizOptions(answer: VocabularyWord) {
 
 function App() {
   const [checkins, setCheckins] = useState<Checkin[]>([]);
+  const [wrongAnswers, setWrongAnswers] = useState<WrongAnswer[]>([]);
+  const [wrongAnswersLoaded, setWrongAnswersLoaded] = useState(false);
   const [loginOpen, setLoginOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [wrongBookOpen, setWrongBookOpen] = useState(false);
   const [profileName, setProfileName] = useState(() => window.localStorage.getItem('lumipath-profile') ?? '');
   const [draftName, setDraftName] = useState(profileName);
   const [saving, setSaving] = useState(false);
@@ -161,6 +172,13 @@ function App() {
   const challengeTimerRatio = challengeTimeLeft / challengeLevel.timeLimit;
   const challengeTimerDanger = challengeTimerRatio <= 0.3;
   const challengeHealthSegments = Array.from({ length: challengeLevel.maxHealth }, (_, index) => index);
+  const wrongAnswerRows = useMemo(
+    () => wrongAnswers
+      .map((entry) => ({ entry, word: words.find((word) => word.id === entry.wordId) }))
+      .filter((row): row is { entry: WrongAnswer; word: VocabularyWord } => Boolean(row.word))
+      .sort((a, b) => b.entry.mistakes - a.entry.mistakes || b.entry.lastWrongAt.localeCompare(a.entry.lastWrongAt)),
+    [wrongAnswers],
+  );
   const totalLearnedWords = useMemo(
     () => checkins.reduce((total, checkin) => total + checkin.learnedWords, 0),
     [checkins],
@@ -178,6 +196,8 @@ function App() {
   useEffect(() => {
     if (!isLoggedIn) {
       setCheckins([]);
+      setWrongAnswers([]);
+      setWrongAnswersLoaded(false);
       return;
     }
 
@@ -197,11 +217,23 @@ function App() {
   }, [isLoggedIn, profileName]);
 
   useEffect(() => {
+    if (!isLoggedIn) {
+      return;
+    }
+    setWrongAnswersLoaded(false);
+    const localWrongAnswers = window.localStorage.getItem(`lumipath-wrong-answers-${profileName}`);
+    setWrongAnswers(localWrongAnswers ? JSON.parse(localWrongAnswers) as WrongAnswer[] : []);
+    setWrongAnswersLoaded(true);
+  }, [isLoggedIn, profileName]);
+  useEffect(() => {
     if (isLoggedIn) {
       window.localStorage.setItem(`lumipath-checkins-${profileName}`, JSON.stringify(checkins));
+      if (wrongAnswersLoaded) {
+        window.localStorage.setItem(`lumipath-wrong-answers-${profileName}`, JSON.stringify(wrongAnswers));
+      }
       window.localStorage.setItem('lumipath-profile', profileName);
     }
-  }, [checkins, isLoggedIn, profileName]);
+  }, [checkins, wrongAnswers, wrongAnswersLoaded, isLoggedIn, profileName]);
 
   function startDailyLearning() {
     if (!isLoggedIn) {
@@ -256,6 +288,38 @@ function App() {
     setAnswerVisible(false);
   }
 
+
+  function recordWrongAnswer(word: VocabularyWord, mode: string, selectedText?: string) {
+    if (!isLoggedIn) {
+      return;
+    }
+
+    setWrongAnswers((current) => {
+      const timestamp = new Date().toISOString();
+      const existing = current.find((entry) => entry.wordId === word.id);
+      if (!existing) {
+        return current.concat({
+          wordId: word.id,
+          mistakes: 1,
+          lastWrongAt: timestamp,
+          modes: [mode],
+          lastSelected: selectedText,
+        });
+      }
+
+      return current.map((entry) => (
+        entry.wordId === word.id
+          ? {
+              ...entry,
+              mistakes: entry.mistakes + 1,
+              lastWrongAt: timestamp,
+              modes: Array.from(new Set(entry.modes.concat(mode))),
+              lastSelected: selectedText,
+            }
+          : entry
+      ));
+    });
+  }
   function startQuiz(mode: QuizMode) {
     setQuizMode(mode);
     const batch = drawWords(QUIZ_QUESTION_COUNT);
@@ -274,7 +338,15 @@ function App() {
     setSelectedQuizWordId(wordId);
     if (wordId === currentQuizWord.id) {
       setQuizScore((score) => score + 1);
+      return;
     }
+
+    const selectedWord = words.find((word) => word.id === wordId);
+    recordWrongAnswer(
+      currentQuizWord,
+      quizMode === 'zh-to-en' ? '看中文选英文' : '看英文选中文',
+      selectedWord ? (quizMode === 'zh-to-en' ? selectedWord.word : getPrimaryMeaning(selectedWord)) : undefined,
+    );
   }
 
   function nextQuizQuestion() {
@@ -333,6 +405,14 @@ function App() {
   function applyChallengeMiss(timedOut = false, selectedWordId = challengeSelectedWordId) {
     setChallengeSelectedWordId(timedOut ? -1 : selectedWordId);
     setChallengeTimedOut(timedOut);
+    if (challengeWord) {
+      const selectedWord = challengeOptions.find((word) => word.id === selectedWordId);
+      recordWrongAnswer(
+        challengeWord,
+        timedOut ? `挑战模式 难度${challengeLevel.level} 超时` : `挑战模式 难度${challengeLevel.level}`,
+        timedOut ? '超时未选择' : selectedWord ? getPrimaryMeaning(selectedWord) : undefined,
+      );
+    }
     setChallengeCombo(0);
     setChallengeDamageFlash((tick) => tick + 1);
     setChallengeHealth((health) => {
@@ -386,11 +466,15 @@ function App() {
 
   function logout() {
     setProfileOpen(false);
+    setWrongBookOpen(false);
+    setWrongAnswersLoaded(false);
     setProfileName('');
     setDraftName('');
     setLearningWords([]);
     setQuizWords([]);
     setCheckins([]);
+    setWrongAnswers([]);
+      setWrongAnswersLoaded(false);
     window.localStorage.removeItem('lumipath-profile');
   }
 
@@ -405,7 +489,7 @@ function App() {
         {isLoggedIn ? (
           <nav className="nav-links" aria-label="主导航">
             <button type="button" onClick={() => setProfileOpen(true)}>个人信息</button>
-            <a href="#roadmap">功能预留</a>
+            <a href="#roadmap">学习轮盘</a>
           </nav>
         ) : null}
         <IslandButton
@@ -446,82 +530,124 @@ function App() {
           </div>
         </section>
       ) : (
-        <>
-          <section className="hero logged-hero" id="top">
-            <div className="hero-copy">
-              <IslandBadge>Daily English Command Center</IslandBadge>
-              <h1>先背完今天的 10 个单词，再点亮日历。</h1>
-              <p>点击每日打卡后，系统会从词库中随机抽取 10 个单词。逐个查看释义、例句和记忆提示，全部确认掌握后才会记录今日打卡。</p>
-              <div className="hero-actions">
-                <IslandButton icon={<BookOpenCheck size={18} />} onClick={startDailyLearning} disabled={checkedToday || saving}>
-                  {checkedToday ? '今日已打卡' : saving ? '记录中...' : '开始每日打卡'}
-                </IslandButton>
-              </div>
-            </div>
-          </section>
+        <section className="learning-wheel" id="roadmap">
+          <div className="learning-wheel__heading">
+            <IslandBadge>Learning Orbit</IslandBadge>
+            <h1>把今天的学习从轮盘开始。</h1>
+            <p>悬停或聚焦中心按钮展开功能。练习模式和挑战模式会继续向外弹出子轮盘。</p>
+          </div>
 
-          <section className="roadmap" id="roadmap">
-            <div className="section-heading">
-              <span>LEARNING MODES</span>
-              <h2>功能练习</h2>
-            </div>
-            <div className="roadmap-grid roadmap-grid--modes">
-              <IslandCard>
-                <BrainCircuit size={24} />
-                <h3>词库与复习算法</h3>
-                <p>下一步可记录单词掌握状态，接入间隔复习和错词优先抽取。</p>
-              </IslandCard>
-              <div className="mode-selector" tabIndex={0}>
-                <IslandCard className="feature-action-card mode-selector__main">
-                  <BookOpenCheck size={24} />
-                  <h3>选择练习模式</h3>
-                  <p>悬停后选择中文到英文，或英文到中文的四选一练习。</p>
-                </IslandCard>
-                <div className="mode-popover xyz-in" data-xyz="fade up small stagger ease-out-back">
-                  <button className="mode-card" onClick={() => startQuiz('zh-to-en')}>
-                    <span>01</span>
-                    <strong>看中文选英文</strong>
-                    <em>根据中文释义选择英文单词</em>
-                  </button>
-                  <button className="mode-card" onClick={() => startQuiz('en-to-zh')}>
-                    <span>02</span>
-                    <strong>看英文选中文</strong>
-                    <em>根据英文单词选择中文释义</em>
-                  </button>
-                </div>
-              </div>
-              <div
-                className="challenge-selector"
-                onMouseEnter={() => setChallengePickerOpen(true)}
-                onMouseLeave={() => setChallengePickerOpen(false)}
-                onFocus={() => setChallengePickerOpen(true)}
-                onBlur={(event) => {
-                  if (!event.currentTarget.contains(event.relatedTarget)) setChallengePickerOpen(false);
-                }}
-                tabIndex={0}
-              >
-                <IslandCard className="feature-action-card challenge-entry-card">
-                  <Orbit size={24} />
-                  <h3>挑战模式</h3>
-                  <p>选择难度后开始。血量越少，容错越低。</p>
-                </IslandCard>
-                {challengePickerOpen ? (
-                  <div className="challenge-level-popover xyz-in" data-xyz="fade up small stagger ease-out-back">
-                    {CHALLENGE_LEVELS.map((level) => (
-                      <button key={level.level} className={`challenge-level-card challenge-level-card--${level.level}`} onClick={() => startChallenge(level)}>
-                        <span>难度 {level.level}</span>
-                        <strong>{level.label}</strong>
-                        <em>{level.maxHealth} 格血 · {level.timeLimit}s / 题</em>
-                      </button>
-                    ))}
-                  </div>
-                ) : null}
+          <div className="learning-wheel-stage" tabIndex={0} aria-label="学习功能轮盘">
+            <button className="wheel-core" type="button" aria-label="开始学习功能轮盘">
+              <span>START</span>
+              <strong>开始学习</strong>
+              <em>Hover to open</em>
+            </button>
+
+            <button
+              className="wheel-node wheel-node--daily"
+              type="button"
+              onClick={startDailyLearning}
+              disabled={checkedToday || saving}
+            >
+              <BookOpenCheck size={24} />
+              <span>DAILY CHECK-IN</span>
+              <strong>{checkedToday ? '今日已打卡' : '每日打卡'}</strong>
+              <em>{checkedToday ? 'Calendar lit' : saving ? 'Saving...' : '10 words today'}</em>
+            </button>
+
+            <div className="wheel-node-wrap wheel-node-wrap--practice" tabIndex={0}>
+              <button className="wheel-node wheel-node--practice" type="button">
+                <BookOpenCheck size={24} />
+                <span>PRACTICE SWITCH</span>
+                <strong>选择练习模式</strong>
+                <em>2 quiz paths</em>
+              </button>
+              <div className="wheel-submenu wheel-submenu--practice" aria-label="练习模式子轮盘">
+                <button className="wheel-subitem wheel-subitem--blue" type="button" onClick={() => startQuiz('zh-to-en')}>
+                  <span>01</span>
+                  <strong>看中文选英文</strong>
+                  <em>ZH to EN</em>
+                </button>
+                <button className="wheel-subitem wheel-subitem--green" type="button" onClick={() => startQuiz('en-to-zh')}>
+                  <span>02</span>
+                  <strong>看英文选中文</strong>
+                  <em>EN to ZH</em>
+                </button>
               </div>
             </div>
-          </section>
-        </>
+
+            <div className="wheel-node-wrap wheel-node-wrap--challenge" tabIndex={0}>
+              <button className="wheel-node wheel-node--challenge" type="button">
+                <Orbit size={24} />
+                <span>CHALLENGE ARENA</span>
+                <strong>挑战模式</strong>
+                <em>5 difficulty rings</em>
+              </button>
+              <div className="wheel-submenu wheel-submenu--challenge" aria-label="挑战难度子轮盘">
+                {CHALLENGE_LEVELS.map((level) => (
+                  <button
+                    key={level.level}
+                    className={`wheel-subitem wheel-subitem--level wheel-subitem--level-${level.level}`}
+                    type="button"
+                    onClick={() => startChallenge(level)}
+                  >
+                    <span>{level.level}</span>
+                    <strong>{level.label}</strong>
+                    <em>{level.maxHealth}HP · {level.timeLimit}s</em>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <button className="wheel-node wheel-node--wrongbook" type="button" onClick={() => setWrongBookOpen(true)}>
+              <BookMarked size={24} />
+              <span>ERROR NOTEBOOK</span>
+              <strong>错题本</strong>
+              <em>{wrongAnswerRows.length} saved words</em>
+            </button>
+          </div>
+        </section>
       )}
 
+      {wrongBookOpen && isLoggedIn ? (
+        <div className="modal-backdrop" role="presentation" onClick={() => setWrongBookOpen(false)}>
+          <section className="wrongbook-modal xyz-in" data-xyz="fade up small ease-out-back" role="dialog" aria-modal="true" aria-labelledby="wrongbook-title" onClick={(event) => event.stopPropagation()}>
+            <button className="modal-close" onClick={() => setWrongBookOpen(false)} aria-label="关闭错题本"><X size={18} /></button>
+            <div className="wrongbook-cover">
+              <BookMarked size={30} />
+              <span>个人错题档案</span>
+              <h2 id="wrongbook-title">错题本</h2>
+              <p>{profileName} 的错词会按错误次数排序，最近答错的单词会自动靠前。</p>
+              <strong>{wrongAnswerRows.reduce((total, row) => total + row.entry.mistakes, 0)} 次错误记录</strong>
+            </div>
+            <div className="wrongbook-pages">
+              {wrongAnswerRows.length ? wrongAnswerRows.map(({ entry, word }, index) => (
+                <article className="wrongbook-entry" key={entry.wordId}>
+                  <div className="wrongbook-entry__rank">{String(index + 1).padStart(2, '0')}</div>
+                  <div>
+                    <span>{word.difficulty?.cefr ?? 'CEFR'} · {entry.modes.join(' / ')}</span>
+                    <h3>{word.word}</h3>
+                    <p>{getEnglishDefinition(word)}</p>
+                    <strong>{getPrimaryMeaning(word)}</strong>
+                    {entry.lastSelected ? <em>上次误选：{entry.lastSelected}</em> : null}
+                  </div>
+                  <div className="wrongbook-entry__count">
+                    <strong>{entry.mistakes}</strong>
+                    <span>次</span>
+                  </div>
+                </article>
+              )) : (
+                <div className="wrongbook-empty">
+                  <BookOpenCheck size={42} />
+                  <h3>还没有错题</h3>
+                  <p>完成练习或挑战后，答错和超时的单词会自动收进这里。</p>
+                </div>
+              )}
+            </div>
+          </section>
+        </div>
+      ) : null}
       {profileOpen && isLoggedIn ? (
         <div className="profile-backdrop" role="presentation" onClick={() => setProfileOpen(false)}>
           <section className="profile-dock" role="dialog" aria-modal="true" aria-labelledby="profile-title" onClick={(event) => event.stopPropagation()}>
@@ -754,6 +880,27 @@ function App() {
 }
 
 export default App;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
