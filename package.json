@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node ./scripts/dev.mjs",
     "dev:web": "vite --host 127.0.0.1",
-    "dev:api": "tsx server/index.ts",
+    "dev:api": "node ./scripts/run-fastapi.mjs",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 127.0.0.1"
   },

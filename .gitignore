@@ -3,4 +3,9 @@ dist/
 dev-server.*.log
 api-server.*.log
 .runtime/
+data/*.sqlite
+data/*.sqlite-shm
+data/*.sqlite-wal
+__pycache__/
+*.pyc
 .DS_Store

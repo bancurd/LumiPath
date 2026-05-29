@@ -3,6 +3,7 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $RuntimeDir = Join-Path $Root ".runtime"
 $Node = "C:\Program Files\nodejs\node.exe"
+$Python = if ($env:LUMIPATH_PYTHON) { $env:LUMIPATH_PYTHON } else { Join-Path $env:USERPROFILE ".cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" }
 
 function Test-PortFree($Port) {
   $connection = Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $Port -ErrorAction SilentlyContinue
@@ -37,6 +38,10 @@ function Start-HiddenProcess {
 
 New-Item -ItemType Directory -Force -Path $RuntimeDir | Out-Null
 
+if (-not (Test-Path -LiteralPath $Python)) {
+  throw "Python runtime not found: $Python. Set LUMIPATH_PYTHON to a Python executable with FastAPI and uvicorn installed."
+}
+
 $StatePath = Join-Path $RuntimeDir "site.json"
 if (Test-Path -LiteralPath $StatePath) {
   & (Join-Path $PSScriptRoot "stop-site.ps1")
@@ -44,16 +49,13 @@ if (Test-Path -LiteralPath $StatePath) {
 
 $apiPort = Find-FreePort 8938
 $webPort = Find-FreePort 5317
-$apiOut = Join-Path $RuntimeDir "api.out.log"
-$apiErr = Join-Path $RuntimeDir "api.err.log"
-$webOut = Join-Path $RuntimeDir "web.out.log"
-$webErr = Join-Path $RuntimeDir "web.err.log"
-Set-Content -LiteralPath $apiOut -Value ""
-Set-Content -LiteralPath $apiErr -Value ""
-Set-Content -LiteralPath $webOut -Value ""
-Set-Content -LiteralPath $webErr -Value ""
+$logStamp = Get-Date -Format "yyyyMMdd-HHmmss"
+$apiOut = Join-Path $RuntimeDir "api-$logStamp.out.log"
+$apiErr = Join-Path $RuntimeDir "api-$logStamp.err.log"
+$webOut = Join-Path $RuntimeDir "web-$logStamp.out.log"
+$webErr = Join-Path $RuntimeDir "web-$logStamp.err.log"
 
-$apiCommand = "set LUMIPATH_API_PORT=$apiPort&& set LUMIPATH_WEB_PORT=$webPort&& `"$Node`" `".\node_modules\tsx\dist\cli.mjs`" `"server\index.ts`" > `"$apiOut`" 2> `"$apiErr`""
+$apiCommand = "set LUMIPATH_API_PORT=$apiPort&& set LUMIPATH_WEB_PORT=$webPort&& `"$Python`" -m uvicorn server.main:app --host 127.0.0.1 --port $apiPort > `"$apiOut`" 2> `"$apiErr`""
 $webCommand = "set LUMIPATH_API_PORT=$apiPort&& set LUMIPATH_WEB_PORT=$webPort&& `"$Node`" `".\node_modules\vite\bin\vite.js`" --host 127.0.0.1 > `"$webOut`" 2> `"$webErr`""
 
 $api = Start-HiddenProcess $apiCommand
@@ -66,6 +68,10 @@ Start-Sleep -Seconds 3
   webPid = $web.Id
   apiPort = $apiPort
   webPort = $webPort
+  apiOut = $apiOut
+  apiErr = $apiErr
+  webOut = $webOut
+  webErr = $webErr
   url = "http://127.0.0.1:$webPort"
   startedAt = (Get-Date).ToString("s")
 } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $RuntimeDir "site.json") -Encoding UTF8

@@ -116,6 +116,12 @@ function buildQuizOptions(answer: VocabularyWord) {
   return drawWords(3, words.filter((word) => word.id !== answer.id)).concat(answer).sort(() => Math.random() - 0.5);
 }
 
+function getUserHeaders(authToken: string) {
+  return {
+    Authorization: `Bearer ${authToken}`,
+  };
+}
+
 function App() {
   const [checkins, setCheckins] = useState<Checkin[]>([]);
   const [wrongAnswers, setWrongAnswers] = useState<WrongAnswer[]>([]);
@@ -124,7 +130,13 @@ function App() {
   const [profileOpen, setProfileOpen] = useState(false);
   const [wrongBookOpen, setWrongBookOpen] = useState(false);
   const [profileName, setProfileName] = useState(() => window.localStorage.getItem('lumipath-profile') ?? '');
+  const [authToken, setAuthToken] = useState(() => window.localStorage.getItem('lumipath-token') ?? '');
   const [draftName, setDraftName] = useState(profileName);
+  const [draftPassword, setDraftPassword] = useState('');
+  const [draftPasswordConfirm, setDraftPasswordConfirm] = useState('');
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [authError, setAuthError] = useState('');
+  const [authSubmitting, setAuthSubmitting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [learningWords, setLearningWords] = useState<VocabularyWord[]>([]);
   const [currentWordIndex, setCurrentWordIndex] = useState(0);
@@ -150,8 +162,9 @@ function App() {
   const [challengeTimeLeft, setChallengeTimeLeft] = useState<number>(CHALLENGE_LEVELS[0].timeLimit);
   const [challengeTimedOut, setChallengeTimedOut] = useState(false);
   const [challengeGameOver, setChallengeGameOver] = useState(false);
+  const [activeWheelPanel, setActiveWheelPanel] = useState<'practice' | 'challenge' | null>(null);
 
-  const isLoggedIn = profileName.trim().length > 0;
+  const isLoggedIn = profileName.trim().length > 0 && authToken.trim().length > 0;
   const todayKey = getLocalDateKey();
   const monthDays = useMemo(() => buildMonthDays(new Date()), []);
   const checkedDates = useMemo(() => new Set(checkins.map((checkin) => checkin.date)), [checkins]);
@@ -201,7 +214,9 @@ function App() {
       return;
     }
 
-    fetch('/api/checkins')
+    fetch('/api/checkins', {
+      headers: getUserHeaders(authToken),
+    })
       .then((response) => response.json())
       .then((data: { checkins?: Checkin[] }) => {
         if (Array.isArray(data.checkins)) {
@@ -214,17 +229,28 @@ function App() {
           setCheckins(JSON.parse(local) as Checkin[]);
         }
       });
-  }, [isLoggedIn, profileName]);
+  }, [isLoggedIn, profileName, authToken]);
 
   useEffect(() => {
     if (!isLoggedIn) {
       return;
     }
     setWrongAnswersLoaded(false);
-    const localWrongAnswers = window.localStorage.getItem(`lumipath-wrong-answers-${profileName}`);
-    setWrongAnswers(localWrongAnswers ? JSON.parse(localWrongAnswers) as WrongAnswer[] : []);
-    setWrongAnswersLoaded(true);
-  }, [isLoggedIn, profileName]);
+    fetch('/api/wrong-answers', {
+      headers: getUserHeaders(authToken),
+    })
+      .then((response) => response.json())
+      .then((data: { wrongAnswers?: WrongAnswer[] }) => {
+        if (Array.isArray(data.wrongAnswers)) {
+          setWrongAnswers(data.wrongAnswers);
+        }
+      })
+      .catch(() => {
+        const localWrongAnswers = window.localStorage.getItem(`lumipath-wrong-answers-${profileName}`);
+        setWrongAnswers(localWrongAnswers ? JSON.parse(localWrongAnswers) as WrongAnswer[] : []);
+      })
+      .finally(() => setWrongAnswersLoaded(true));
+  }, [isLoggedIn, profileName, authToken]);
   useEffect(() => {
     if (isLoggedIn) {
       window.localStorage.setItem(`lumipath-checkins-${profileName}`, JSON.stringify(checkins));
@@ -232,8 +258,9 @@ function App() {
         window.localStorage.setItem(`lumipath-wrong-answers-${profileName}`, JSON.stringify(wrongAnswers));
       }
       window.localStorage.setItem('lumipath-profile', profileName);
+      window.localStorage.setItem('lumipath-token', authToken);
     }
-  }, [checkins, wrongAnswers, wrongAnswersLoaded, isLoggedIn, profileName]);
+  }, [checkins, wrongAnswers, wrongAnswersLoaded, isLoggedIn, profileName, authToken]);
 
   function startDailyLearning() {
     if (!isLoggedIn) {
@@ -253,8 +280,11 @@ function App() {
     try {
       const response = await fetch('/api/checkins/today', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ learnedWords: completedCount }),
+        headers: { 'Content-Type': 'application/json', ...getUserHeaders(authToken) },
+        body: JSON.stringify({
+          learnedWords: completedCount,
+          wordIds: learningWords.slice(0, completedCount).map((word) => word.id),
+        }),
       });
       const data = (await response.json()) as { checkin: Checkin };
       setCheckins((current) => [...current.filter((item) => item.date !== data.checkin.date), data.checkin]);
@@ -293,6 +323,12 @@ function App() {
     if (!isLoggedIn) {
       return;
     }
+
+    fetch('/api/wrong-answers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...getUserHeaders(authToken) },
+      body: JSON.stringify({ wordId: word.id, mode, selectedText }),
+    }).catch(() => undefined);
 
     setWrongAnswers((current) => {
       const timestamp = new Date().toISOString();
@@ -455,13 +491,43 @@ function App() {
 
     return () => window.clearTimeout(timer);
   }, [challengeActive, challengeAnswered, challengeGameOver, challengeTimeLeft, challengeHealth, challengeLevel]);
-  function submitLogin() {
+  async function submitLogin() {
     const name = draftName.trim();
     if (!name) {
+      setAuthError('请输入账户昵称。');
       return;
     }
-    setProfileName(name);
-    setLoginOpen(false);
+    if (draftPassword.length < 4) {
+      setAuthError('密码至少需要 4 位。');
+      return;
+    }
+    if (authMode === 'register' && draftPassword !== draftPasswordConfirm) {
+      setAuthError('两次输入的密码不一致。');
+      return;
+    }
+    setAuthSubmitting(true);
+    setAuthError('');
+    try {
+      const response = await fetch(authMode === 'login' ? '/api/auth/login' : '/api/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ displayName: name, password: draftPassword }),
+      });
+      const data = (await response.json()) as { user?: { displayName?: string; token?: string }; detail?: unknown; error?: string };
+      if (!response.ok) {
+        setAuthError(typeof data.detail === 'string' ? data.detail : data.error ?? '认证失败，请检查账户信息。');
+        return;
+      }
+      setProfileName(data.user?.displayName ?? name);
+      setAuthToken(data.user?.token ?? '');
+      setDraftPassword('');
+      setDraftPasswordConfirm('');
+      setLoginOpen(false);
+    } catch {
+      setAuthError('后端暂时不可用，请稍后再试。');
+    } finally {
+      setAuthSubmitting(false);
+    }
   }
 
   function logout() {
@@ -469,13 +535,19 @@ function App() {
     setWrongBookOpen(false);
     setWrongAnswersLoaded(false);
     setProfileName('');
+    setAuthToken('');
     setDraftName('');
+    setDraftPassword('');
+    setDraftPasswordConfirm('');
+    setAuthError('');
+    setAuthMode('login');
     setLearningWords([]);
     setQuizWords([]);
     setCheckins([]);
     setWrongAnswers([]);
       setWrongAnswersLoaded(false);
     window.localStorage.removeItem('lumipath-profile');
+    window.localStorage.removeItem('lumipath-token');
   }
 
   return (
@@ -537,7 +609,7 @@ function App() {
             <p>悬停或聚焦中心按钮展开功能。练习模式和挑战模式会继续向外弹出子轮盘。</p>
           </div>
 
-          <div className="learning-wheel-stage" tabIndex={0} aria-label="学习功能轮盘">
+          <div className="learning-wheel-stage" tabIndex={0} aria-label="学习功能轮盘" onMouseLeave={() => setActiveWheelPanel(null)}>
             <button className="wheel-core" type="button" aria-label="开始学习功能轮盘">
               <span>START</span>
               <strong>开始学习</strong>
@@ -548,6 +620,8 @@ function App() {
               className="wheel-node wheel-node--daily"
               type="button"
               onClick={startDailyLearning}
+              onMouseEnter={() => setActiveWheelPanel(null)}
+              onFocus={() => setActiveWheelPanel(null)}
               disabled={checkedToday || saving}
             >
               <BookOpenCheck size={24} />
@@ -556,51 +630,85 @@ function App() {
               <em>{checkedToday ? 'Calendar lit' : saving ? 'Saving...' : '10 words today'}</em>
             </button>
 
-            <div className="wheel-node-wrap wheel-node-wrap--practice" tabIndex={0}>
+            <div
+              className={`wheel-node-wrap wheel-node-wrap--practice ${activeWheelPanel === 'practice' ? 'wheel-node-wrap--active' : ''}`}
+              tabIndex={0}
+              onMouseEnter={() => setActiveWheelPanel('practice')}
+              onFocus={() => setActiveWheelPanel('practice')}
+            >
               <button className="wheel-node wheel-node--practice" type="button">
                 <BookOpenCheck size={24} />
                 <span>PRACTICE SWITCH</span>
                 <strong>选择练习模式</strong>
                 <em>2 quiz paths</em>
               </button>
-              <div className="wheel-submenu wheel-submenu--practice" aria-label="练习模式子轮盘">
-                <button className="wheel-subitem wheel-subitem--blue" type="button" onClick={() => startQuiz('zh-to-en')}>
-                  <span>01</span>
-                  <strong>看中文选英文</strong>
-                  <em>ZH to EN</em>
-                </button>
-                <button className="wheel-subitem wheel-subitem--green" type="button" onClick={() => startQuiz('en-to-zh')}>
-                  <span>02</span>
-                  <strong>看英文选中文</strong>
-                  <em>EN to ZH</em>
-                </button>
-              </div>
             </div>
 
-            <div className="wheel-node-wrap wheel-node-wrap--challenge" tabIndex={0}>
+            <div
+              className={`wheel-node-wrap wheel-node-wrap--challenge ${activeWheelPanel === 'challenge' ? 'wheel-node-wrap--active' : ''}`}
+              tabIndex={0}
+              onMouseEnter={() => setActiveWheelPanel('challenge')}
+              onFocus={() => setActiveWheelPanel('challenge')}
+            >
               <button className="wheel-node wheel-node--challenge" type="button">
                 <Orbit size={24} />
                 <span>CHALLENGE ARENA</span>
                 <strong>挑战模式</strong>
                 <em>5 difficulty rings</em>
               </button>
-              <div className="wheel-submenu wheel-submenu--challenge" aria-label="挑战难度子轮盘">
-                {CHALLENGE_LEVELS.map((level) => (
-                  <button
-                    key={level.level}
-                    className={`wheel-subitem wheel-subitem--level wheel-subitem--level-${level.level}`}
-                    type="button"
-                    onClick={() => startChallenge(level)}
-                  >
-                    <span>{level.level}</span>
-                    <strong>{level.label}</strong>
-                    <em>{level.maxHealth}HP · {level.timeLimit}s</em>
-                  </button>
-                ))}
-              </div>
             </div>
 
-            <button className="wheel-node wheel-node--wrongbook" type="button" onClick={() => setWrongBookOpen(true)}>
+            {activeWheelPanel === 'practice' ? (
+              <div className="wheel-submenu-panel wheel-submenu-panel--practice" onMouseEnter={() => setActiveWheelPanel('practice')} onFocus={() => setActiveWheelPanel('practice')}>
+                <div className="wheel-submenu-panel__top">
+                  <span>Practice paths</span>
+                  <strong>选择练习方式</strong>
+                </div>
+                <div className="wheel-panel-grid wheel-panel-grid--practice" aria-label="练习模式子面板">
+                  <button className="wheel-subitem wheel-subitem--blue" type="button" onClick={() => startQuiz('zh-to-en')}>
+                    <span>01</span>
+                    <strong>看中文选英文</strong>
+                    <em>ZH to EN</em>
+                  </button>
+                  <button className="wheel-subitem wheel-subitem--green" type="button" onClick={() => startQuiz('en-to-zh')}>
+                    <span>02</span>
+                    <strong>看英文选中文</strong>
+                    <em>EN to ZH</em>
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            {activeWheelPanel === 'challenge' ? (
+              <div className="wheel-submenu-panel wheel-submenu-panel--challenge" onMouseEnter={() => setActiveWheelPanel('challenge')} onFocus={() => setActiveWheelPanel('challenge')}>
+                <div className="wheel-submenu-panel__top">
+                  <span>Challenge arena</span>
+                  <strong>选择挑战难度</strong>
+                </div>
+                <div className="wheel-panel-grid wheel-panel-grid--challenge" aria-label="挑战难度子面板">
+                  {CHALLENGE_LEVELS.map((level) => (
+                    <button
+                      key={level.level}
+                      className={`wheel-subitem wheel-subitem--level wheel-subitem--level-${level.level}`}
+                      type="button"
+                      onClick={() => startChallenge(level)}
+                    >
+                      <span>{level.level}</span>
+                      <strong>{level.label}</strong>
+                      <em>{level.maxHealth}HP · {level.timeLimit}s</em>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            <button
+              className="wheel-node wheel-node--wrongbook"
+              type="button"
+              onClick={() => setWrongBookOpen(true)}
+              onMouseEnter={() => setActiveWheelPanel(null)}
+              onFocus={() => setActiveWheelPanel(null)}
+            >
               <BookMarked size={24} />
               <span>ERROR NOTEBOOK</span>
               <strong>错题本</strong>
@@ -865,13 +973,45 @@ function App() {
       {loginOpen ? (
         <div className="modal-backdrop" role="presentation">
           <div className="login-modal" role="dialog" aria-modal="true" aria-labelledby="login-title">
-            <button className="modal-close" onClick={() => setLoginOpen(false)} aria-label="关闭登录"><X size={18} /></button>
-            <span>LOGIN</span>
-            <h2 id="login-title">登录学习账户</h2>
-            <p>输入昵称即可进入学习中心。登录后才会展示每日打卡入口和日历。</p>
-            <label htmlFor="profile-name">账户昵称</label>
-            <input id="profile-name" value={draftName} placeholder="例如 Leo" onChange={(event) => setDraftName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') submitLogin(); }} />
-            <IslandButton onClick={submitLogin}>进入学习中心</IslandButton>
+            <button
+              className="modal-close"
+              onClick={() => {
+                setLoginOpen(false);
+                setAuthError('');
+              }}
+              aria-label="关闭登录"
+            >
+              <X size={18} />
+            </button>
+            <span>{authMode === 'login' ? 'LOGIN' : 'REGISTER'}</span>
+            <h2 id="login-title">{authMode === 'login' ? '登录学习账户' : '注册学习账户'}</h2>
+            <p>{authMode === 'login' ? '输入账户昵称和密码，继续你的每日学习进度。' : '创建一个本地学习账户，打卡、已学单词和错题本会写入 SQLite 数据库。'}</p>
+            <div className="auth-tabs" role="tablist" aria-label="账户模式">
+              <button className={authMode === 'login' ? 'auth-tab auth-tab--active' : 'auth-tab'} type="button" onClick={() => { setAuthMode('login'); setAuthError(''); }}>
+                登录
+              </button>
+              <button className={authMode === 'register' ? 'auth-tab auth-tab--active' : 'auth-tab'} type="button" onClick={() => { setAuthMode('register'); setAuthError(''); }}>
+                注册
+              </button>
+            </div>
+            <div className="auth-form-grid">
+              <label htmlFor="profile-name">账户昵称</label>
+              <input id="profile-name" value={draftName} placeholder="例如 Leo" autoComplete="username" onChange={(event) => setDraftName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void submitLogin(); }} />
+              <label htmlFor="profile-password">账户密码</label>
+              <input id="profile-password" value={draftPassword} placeholder="至少 4 位" type="password" autoComplete={authMode === 'login' ? 'current-password' : 'new-password'} onChange={(event) => setDraftPassword(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void submitLogin(); }} />
+              {authMode === 'register' ? (
+                <>
+                  <label htmlFor="profile-password-confirm">确认密码</label>
+                  <input id="profile-password-confirm" value={draftPasswordConfirm} placeholder="再次输入密码" type="password" autoComplete="new-password" onChange={(event) => setDraftPasswordConfirm(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void submitLogin(); }} />
+                </>
+              ) : null}
+            </div>
+            {authError ? <div className="auth-error" role="alert">{authError}</div> : null}
+            <div className="auth-actions">
+              <IslandButton onClick={() => void submitLogin()} disabled={authSubmitting}>
+                {authSubmitting ? '处理中...' : authMode === 'login' ? '登录学习中心' : '创建并进入'}
+              </IslandButton>
+            </div>
           </div>
         </div>
       ) : null}
