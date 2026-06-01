@@ -30,6 +30,7 @@ type QuizMode = 'zh-to-en' | 'en-to-zh';
 type WrongAnswer = {
   wordId: number;
   mistakes: number;
+  resolvedStreak?: number;
   lastWrongAt: string;
   modes: string[];
   lastSelected?: string;
@@ -120,6 +121,12 @@ function getUserHeaders(authToken: string) {
   return {
     Authorization: `Bearer ${authToken}`,
   };
+}
+
+function wordsByIds(wordIds: number[]) {
+  return wordIds
+    .map((wordId) => words.find((word) => word.id === wordId))
+    .filter((word): word is VocabularyWord => Boolean(word));
 }
 
 function App() {
@@ -262,7 +269,49 @@ function App() {
     }
   }, [checkins, wrongAnswers, wrongAnswersLoaded, isLoggedIn, profileName, authToken]);
 
-  function startDailyLearning() {
+  function recordReviewResult(word: VocabularyWord, grade: 'again' | 'hard' | 'good' | 'easy', source: 'daily-vocabulary' | 'practice') {
+    if (!isLoggedIn) {
+      return;
+    }
+
+    fetch('/api/words/review-result', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...getUserHeaders(authToken) },
+      body: JSON.stringify({ wordId: word.id, grade, source }),
+    })
+      .then((response) => response.json())
+      .then((data: { graduatedWrongAnswer?: boolean }) => {
+        if (data.graduatedWrongAnswer) {
+          setWrongAnswers((current) => current.filter((entry) => entry.wordId !== word.id));
+        }
+      })
+      .catch(() => undefined);
+  }
+
+  function removeWrongAnswer(wordId: number) {
+    setWrongAnswers((current) => current.filter((entry) => entry.wordId !== wordId));
+    fetch(`/api/wrong-answers/${wordId}`, {
+      method: 'DELETE',
+      headers: getUserHeaders(authToken),
+    }).catch(() => undefined);
+  }
+
+  async function loadWordBatch(endpoint: string, count: number) {
+    const response = await fetch(`${endpoint}?count=${count}`, {
+      headers: getUserHeaders(authToken),
+    });
+    if (!response.ok) {
+      throw new Error('Unable to load word batch.');
+    }
+    const data = (await response.json()) as { wordIds?: number[] };
+    const batch = wordsByIds(data.wordIds ?? []);
+    if (!batch.length) {
+      throw new Error('Empty word batch.');
+    }
+    return batch;
+  }
+
+  async function startDailyLearning() {
     if (!isLoggedIn) {
       setLoginOpen(true);
       return;
@@ -270,7 +319,14 @@ function App() {
     if (checkedToday || saving) {
       return;
     }
-    setLearningWords(drawWords(DAILY_WORD_COUNT));
+    setSaving(true);
+    try {
+      setLearningWords(await loadWordBatch('/api/words/daily', DAILY_WORD_COUNT));
+    } catch {
+      setLearningWords(drawWords(DAILY_WORD_COUNT));
+    } finally {
+      setSaving(false);
+    }
     setCurrentWordIndex(0);
     setAnswerVisible(false);
   }
@@ -312,8 +368,12 @@ function App() {
     setAnswerVisible(false);
   }
 
-  function restartLearningBatch() {
-    setLearningWords(drawWords(DAILY_WORD_COUNT));
+  async function restartLearningBatch() {
+    try {
+      setLearningWords(await loadWordBatch('/api/words/daily', DAILY_WORD_COUNT));
+    } catch {
+      setLearningWords(drawWords(DAILY_WORD_COUNT));
+    }
     setCurrentWordIndex(0);
     setAnswerVisible(false);
   }
@@ -356,9 +416,14 @@ function App() {
       ));
     });
   }
-  function startQuiz(mode: QuizMode) {
+  async function startQuiz(mode: QuizMode) {
     setQuizMode(mode);
-    const batch = drawWords(QUIZ_QUESTION_COUNT);
+    let batch: VocabularyWord[];
+    try {
+      batch = await loadWordBatch('/api/words/practice', QUIZ_QUESTION_COUNT);
+    } catch {
+      batch = drawWords(QUIZ_QUESTION_COUNT);
+    }
     setQuizWords(batch);
     setQuizIndex(0);
     setQuizOptions(buildQuizOptions(batch[0]));
@@ -373,11 +438,13 @@ function App() {
     }
     setSelectedQuizWordId(wordId);
     if (wordId === currentQuizWord.id) {
+      recordReviewResult(currentQuizWord, 'good', 'practice');
       setQuizScore((score) => score + 1);
       return;
     }
 
     const selectedWord = words.find((word) => word.id === wordId);
+    recordReviewResult(currentQuizWord, 'again', 'practice');
     recordWrongAnswer(
       currentQuizWord,
       quizMode === 'zh-to-en' ? '看中文选英文' : '看英文选中文',
@@ -619,7 +686,7 @@ function App() {
             <button
               className="wheel-node wheel-node--daily"
               type="button"
-              onClick={startDailyLearning}
+              onClick={() => void startDailyLearning()}
               onMouseEnter={() => setActiveWheelPanel(null)}
               onFocus={() => setActiveWheelPanel(null)}
               disabled={checkedToday || saving}
@@ -665,12 +732,12 @@ function App() {
                   <strong>选择练习方式</strong>
                 </div>
                 <div className="wheel-panel-grid wheel-panel-grid--practice" aria-label="练习模式子面板">
-                  <button className="wheel-subitem wheel-subitem--blue" type="button" onClick={() => startQuiz('zh-to-en')}>
+                  <button className="wheel-subitem wheel-subitem--blue" type="button" onClick={() => void startQuiz('zh-to-en')}>
                     <span>01</span>
                     <strong>看中文选英文</strong>
                     <em>ZH to EN</em>
                   </button>
-                  <button className="wheel-subitem wheel-subitem--green" type="button" onClick={() => startQuiz('en-to-zh')}>
+                  <button className="wheel-subitem wheel-subitem--green" type="button" onClick={() => void startQuiz('en-to-zh')}>
                     <span>02</span>
                     <strong>看英文选中文</strong>
                     <em>EN to ZH</em>
@@ -738,11 +805,13 @@ function App() {
                     <h3>{word.word}</h3>
                     <p>{getEnglishDefinition(word)}</p>
                     <strong>{getPrimaryMeaning(word)}</strong>
+                    <small>连续练对 {entry.resolvedStreak ?? 0}/3 次后自动移出错题本</small>
                     {entry.lastSelected ? <em>上次误选：{entry.lastSelected}</em> : null}
                   </div>
                   <div className="wrongbook-entry__count">
                     <strong>{entry.mistakes}</strong>
                     <span>次</span>
+                    <button type="button" onClick={() => removeWrongAnswer(entry.wordId)}>移出</button>
                   </div>
                 </article>
               )) : (
@@ -802,7 +871,7 @@ function App() {
             <button className="modal-close" onClick={() => setLearningWords([])} aria-label="关闭背词"><X size={18} /></button>
             <div className="study-modal__top">
               <span>WORD {learningProgress}</span>
-              <button className="icon-action" onClick={restartLearningBatch} aria-label="重新抽词"><RotateCcw size={17} /></button>
+              <button className="icon-action" onClick={() => void restartLearningBatch()} aria-label="重新抽词"><RotateCcw size={17} /></button>
             </div>
             <h2 id="study-title">{currentWord.word}</h2>
             <p className="phonetic-line">UK {currentWord.phonetic?.uk ?? '-'} · US {currentWord.phonetic?.us ?? '-'}</p>
@@ -882,7 +951,7 @@ function App() {
                 <p>继续练习可以帮助你在英文单词和中文释义之间建立更快的反应。</p>
                 <div className="study-actions">
                   <IslandButton variant="ghost" onClick={() => setQuizWords([])}>关闭</IslandButton>
-                  <IslandButton onClick={() => startQuiz(quizMode)}>再练一组</IslandButton>
+                  <IslandButton onClick={() => void startQuiz(quizMode)}>再练一组</IslandButton>
                 </div>
               </div>
             )}
