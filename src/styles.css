@@ -2224,9 +2224,18 @@ a {
   font-size: 12px;
 }
 
+.wrongbook-entry small {
+  display: block;
+  margin-top: 8px;
+  color: #7aa94c;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .wrongbook-entry__count {
   display: grid;
   min-width: 70px;
+  gap: 7px;
   justify-items: center;
   padding: 10px;
   border-radius: 16px;
@@ -2238,6 +2247,22 @@ a {
   font-family: var(--font-feather);
   font-size: 34px;
   line-height: 0.9;
+}
+
+.wrongbook-entry__count button {
+  border: 0;
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: #ffffff;
+  color: #8a5d12;
+  cursor: pointer;
+  font-size: 12px;
+  box-shadow: 0 2px 0 rgba(195, 174, 134, 0.75);
+}
+
+.wrongbook-entry__count button:hover {
+  color: #c44949;
+  transform: translateY(-1px);
 }
 
 .wrongbook-empty {
