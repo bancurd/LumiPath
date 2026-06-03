@@ -13,15 +13,18 @@ if (Test-Path -LiteralPath $StatePath) {
   }
   foreach ($port in @($state.apiPort, $state.webPort)) {
     if ($port) {
-      Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $port |
-        Select-Object -ExpandProperty OwningProcess -Unique |
-        ForEach-Object { Stop-Process -Id $_ -Force }
+      try {
+        Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $port -ErrorAction SilentlyContinue |
+          Select-Object -ExpandProperty OwningProcess -Unique |
+          ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
+      } catch {
+      }
 
       netstat -ano |
         Select-String "127\.0\.0\.1:$port\s+.*LISTENING\s+(\d+)" |
         ForEach-Object {
           $processId = [int]$_.Matches[0].Groups[1].Value
-          Stop-Process -Id $processId -Force
+          Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
         }
     }
   }

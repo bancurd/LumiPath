@@ -3,7 +3,13 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $RuntimeDir = Join-Path $Root ".runtime"
 $Node = "C:\Program Files\nodejs\node.exe"
-$Python = if ($env:LUMIPATH_PYTHON) { $env:LUMIPATH_PYTHON } else { Join-Path $env:USERPROFILE ".cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" }
+$PythonCandidates = @(
+  $env:LUMIPATH_PYTHON,
+  (Join-Path $Root ".venv\Scripts\python.exe"),
+  "C:\ProgramData\miniconda3\python.exe",
+  (Join-Path $env:USERPROFILE ".cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe")
+) | Where-Object { $_ }
+$Python = $PythonCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 
 function Test-PortFree($Port) {
   $connection = Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $Port -ErrorAction SilentlyContinue
@@ -38,8 +44,17 @@ function Start-HiddenProcess {
 
 New-Item -ItemType Directory -Force -Path $RuntimeDir | Out-Null
 
-if (-not (Test-Path -LiteralPath $Python)) {
-  throw "Python runtime not found: $Python. Set LUMIPATH_PYTHON to a Python executable with FastAPI and uvicorn installed."
+if (-not $Python) {
+  throw "Python runtime not found. Set LUMIPATH_PYTHON to a Python executable, or install Miniconda at C:\ProgramData\miniconda3."
+}
+
+& $Python -c "import fastapi, uvicorn" 2>$null
+if ($LASTEXITCODE -ne 0) {
+  Write-Host "Installing Python backend dependencies from requirements.txt..."
+  & $Python -m pip install -r (Join-Path $Root "requirements.txt")
+  if ($LASTEXITCODE -ne 0) {
+    throw "Failed to install Python backend dependencies. Run: `"$Python`" -m pip install -r requirements.txt"
+  }
 }
 
 $StatePath = Join-Path $RuntimeDir "site.json"
